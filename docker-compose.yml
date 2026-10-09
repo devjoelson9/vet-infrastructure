@@ -1,0 +1,219 @@
+version: '3.8'
+
+networks:
+  vet-network:
+    driver: bridge
+
+volumes:
+  postgres_identidade_data:
+  postgres_clinico_data:
+  postgres_agendamento_data:
+  postgres_faturamento_data:
+  rabbitmq_data:
+
+services:
+  # --------------------------------------------------
+  # BANCOS DE DADOS
+  # --------------------------------------------------
+  bd-identidade:
+    image: postgres:16-alpine
+    container_name: bd-identidade
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB_IDENTIDADE:-db_identidade}
+      POSTGRES_USER: ${POSTGRES_USER:-vet_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vet_password}
+    volumes:
+      - postgres_identidade_data:/var/lib/postgresql/data
+    networks:
+      - vet-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vet_user} -d ${POSTGRES_DB_IDENTIDADE:-db_identidade}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  bd-clinico:
+    image: postgres:16-alpine
+    container_name: bd-clinico
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB_CLINICO:-db_clinico}
+      POSTGRES_USER: ${POSTGRES_USER:-vet_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vet_password}
+    volumes:
+      - postgres_clinico_data:/var/lib/postgresql/data
+    networks:
+      - vet-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vet_user} -d ${POSTGRES_DB_CLINICO:-db_clinico}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  bd-agendamento:
+    image: postgres:16-alpine
+    container_name: bd-agendamento
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB_AGENDAMENTO:-db_agendamento}
+      POSTGRES_USER: ${POSTGRES_USER:-vet_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vet_password}
+    volumes:
+      - postgres_agendamento_data:/var/lib/postgresql/data
+    networks:
+      - vet-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vet_user} -d ${POSTGRES_DB_AGENDAMENTO:-db_agendamento}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  bd-faturamento:
+    image: postgres:16-alpine
+    container_name: bd-faturamento
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB_FATURAMENTO:-db_faturamento}
+      POSTGRES_USER: ${POSTGRES_USER:-vet_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vet_password}
+    volumes:
+      - postgres_faturamento_data:/var/lib/postgresql/data
+    networks:
+      - vet-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vet_user} -d ${POSTGRES_DB_FATURAMENTO:-db_faturamento}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --------------------------------------------------
+  # RABBITMQ
+  # --------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: message-broker
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - vet-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --------------------------------------------------
+  # MICROSSERVIÇOS
+  # --------------------------------------------------
+  servico-identidade:
+    build:
+      context: ../vet-identidade-service
+      dockerfile: Dockerfile
+    container_name: servico-identidade
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://bd-identidade:5432/${POSTGRES_DB_IDENTIDADE:-db_identidade}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-vet_user}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-vet_password}
+    depends_on:
+      bd-identidade:
+        condition: service_healthy
+    networks:
+      - vet-network
+
+  servico-clinico:
+    build:
+      context: ../vet-clinico-service
+      dockerfile: Dockerfile
+    container_name: servico-clinico
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://bd-clinico:5432/${POSTGRES_DB_CLINICO:-db_clinico}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-vet_user}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-vet_password}
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-guest}
+      SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+    depends_on:
+      bd-clinico:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - vet-network
+
+  servico-agendamento:
+    build:
+      context: ../vet-agendamento-service
+      dockerfile: Dockerfile
+    container_name: servico-agendamento
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://bd-agendamento:5432/${POSTGRES_DB_AGENDAMENTO:-db_agendamento}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-vet_user}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-vet_password}
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-guest}
+      SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+    depends_on:
+      bd-agendamento:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - vet-network
+
+  servico-faturamento:
+    build:
+      context: ../vet-faturamento-service
+      dockerfile: Dockerfile
+    container_name: servico-faturamento
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://bd-faturamento:5432/${POSTGRES_DB_FATURAMENTO:-db_faturamento}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-vet_user}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-vet_password}
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-guest}
+      SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+    depends_on:
+      bd-faturamento:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - vet-network
+
+  # --------------------------------------------------
+  # FRONTEND E API GATEWAY
+  # --------------------------------------------------
+  interface-web:
+    build:
+      context: ../vet-frontend-web
+      dockerfile: Dockerfile
+    container_name: interface-web
+    restart: unless-stopped
+    networks:
+      - vet-network
+
+  api-gateway:
+    build:
+      context: ../vet-api-gateway
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-80}:80"
+    depends_on:
+      - interface-web
+      - servico-identidade
+      - servico-clinico
+      - servico-agendamento
+      - servico-faturamento
+    networks:
+      - vet-network

@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  rabbitmq:
+    ports:
+      - "${RABBITMQ_AMQP_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+
+  bd-identidade:
+    ports:
+      - "${POSTGRES_PORT_IDENTIDADE:-5431}:5432"
+
+  bd-clinico:
+    ports:
+      - "${POSTGRES_PORT_CLINICO:-5432}:5432"
+
+  bd-agendamento:
+    ports:
+      - "${POSTGRES_PORT_AGENDAMENTO:-5433}:5432"
+
+  bd-faturamento:
+    ports:
+      - "${POSTGRES_PORT_FATURAMENTO:-5434}:5432"
