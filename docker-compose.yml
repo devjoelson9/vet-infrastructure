@@ -139,6 +139,7 @@ services:
       SPRING_RABBITMQ_HOST: rabbitmq
       SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-guest}
       SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      JWT_SECRET: ${JWT_SECRET:-uma-chave-secreta-muito-longa-e-segura-para-hmac-sha256}
     depends_on:
       bd-clinico:
         condition: service_healthy
