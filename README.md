@@ -1,156 +1,187 @@
 # 🐾 Sistema de Gestão Veterinária — Infraestrutura & Orquestração
 
-Este repositório contém os scripts de orquestração, variáveis de ambiente e arquivos do Docker Compose responsáveis por provisionar a infraestrutura completa do **Sistema de Gestão Veterinária**.
+Este repositório contém o Docker Compose, as variáveis de ambiente e a documentação de orquestração do **Sistema de Gestão Veterinária**.
 
-A arquitetura é baseada em microsserviços desacoplados, utilizando o padrão **Database-per-Service** (PostgreSQL isolado por serviço), comunicação assíncrona por mensageria via **RabbitMQ** e ponto único de entrada através do **API Gateway (Nginx)**.
+A arquitetura usa microsserviços desacoplados com **Database-per-Service** (PostgreSQL isolado por serviço), comunicação assíncrona via **RabbitMQ** e ponto único de entrada com **API Gateway (Nginx)**.
 
-## 📐 Visão Geral da Arquitetura (C4 — Nível 2)
+## ✅ Status da integração
+
+| Serviço | Situação | Observação |
+|---|---|---|
+| `vet-identidade-service` | ✅ Integrado | Autenticação/JWT, tutores, animais, usuários internos, e-mail (Mailpit). |
+| `vet-clinico-service` | ✅ Integrado | Atendimentos, medicamentos, catálogo, prescrições e publicação de eventos. |
+| `vet-agendamento-service` | ✅ Integrado | Agendamentos/disponibilidades e chamadas HTTP ao serviço de identidade. |
+| `vet-frontend-web` | ✅ Integrado | Build Vite servido pelo Nginx e consumindo o gateway em `/api`. |
+| `vet-api-gateway` | ✅ Integrado | Roteia `/` (frontend) e `/api/v1/**` (microsserviços). |
+| `vet-faturamento-service` | ⏳ Pendente | Ainda é um esqueleto (sem Dockerfile, controllers ou domínio). Bloco comentado no compose. |
+
+## 🔗 Como os serviços conversam
 
 ```text
-                               +-------------------+
-                               |   Interface Web   |
-                               +---------+---------+
-                                         | (HTTPS / JSON)
-                                         v
-                               +-------------------+
-                               |    API Gateway    | (Nginx)
-                               +----+----+----+----+
-                                    |    |    |
-        +---------------------------+    |    +---------------------------+
-        | /identidade                    | /clinico                       | /agendamentos & /faturamento
-        v                                v                                v
-+---------------+                +---------------+                +-----------------------------+
-| Identidade    |                | Serviços      |                | Agendamento & Faturamento   |
-| Service       |                | Clínicos      |                | Services                    |
-+-------+-------+                +-------+-------+                +--------------+--------------+
-        |                                |                                       ^
-        | SQL                            | AMQP (AtendimentoRealizado)           | AMQP (Consumo)
-        v                                v                                       |
-+---------------+                +---------------+                       +-------+-------+
-| BD Identidade |                | Message Broker|---------------------->| RabbitMQ      |
-| (PostgreSQL)  |                | (RabbitMQ)    |                       +---------------+
-+---------------+                +---------------+
+Navegador
+   │  http://localhost:8000/
+   v
+┌──────────────────────┐
+│  api-gateway (Nginx) │
+│  :80                 │
+└──────┬───────────────┘
+       │ /api/v1/** (HTTP, JWT no header Authorization)
+       ├──────────────────────────────► servico-identidade :8080 ──► bd-identidade
+       ├──────────────────────────────► servico-clinico    :8080 ──► bd-clinico ──┐
+       └──────────────────────────────► servico-agendamento:8080 ──► bd-agendamento
+                                                │                                │
+                                                │ HTTP (RestClient)              │ AMQP (publish)
+                                                ▼                                ▼
+                                       servico-identidade                     rabbitmq
+                                                                            exchange vet.events
+                                                                            (atendimento.*)
 ```
 
-### Componentes mapeados
+### 1. Frontend → Gateway
+O frontend é compilado com `VITE_API_BASE_URL=/api` e faz chamadas relativas (`/api/v1/...`). Como ele é servido pelo mesmo Nginx do gateway, não há CORS no navegador.
 
-- **API Gateway (Nginx):** roteia todas as chamadas HTTP externas para os microsserviços internos.
-- **Serviço de Identidade e Cadastro:** gerencia autenticação, usuários, perfis, tutores e animais.
-- **Serviço Clínico:** gerencia prontuários, exames, atendimentos e catálogo de serviços.
-- **Serviço de Agendamento:** gerencia agendas, disponibilidades e check-in.
-- **Serviço de Faturamento e Pagamentos:** gerencia cobranças, faturas e pagamentos.
-- **Message Broker (RabbitMQ):** permite comunicação assíncrona orientada a eventos, como `AtendimentoRealizado`.
-- **Bancos de dados (PostgreSQL):** bancos independentes e isolados por microsserviço.
+### 2. Gateway → Microsserviços
+O Nginx roteia pelo prefixo do recurso, preservando o path original:
 
-## 📂 Estrutura de diretórios recomendada
+| Prefixo | Destino |
+|---|---|
+| `/` | `interface-web:80` |
+| `/api/v1/auth`, `/api/v1/tutores`, `/api/v1/admin`, `/api/v1/recepcionista`, `/api/v1/veterinario` | `servico-identidade:8080` |
+| `/api/v1/atendimentos`, `/api/v1/medicamentos`, `/api/v1/catalogo-itens` | `servico-clinico:8080` |
+| `/api/v1/agendamentos`, `/api/v1/disponibilidades` | `servico-agendamento:8080` |
+| `/api/actuator/health` | `servico-agendamento:8080/actuator/health` |
 
-Para executar o ambiente local, os repositórios dos microsserviços devem estar clonados no mesmo diretório pai (`workspace-vet/`):
+### 3. Agendamento → Identidade (síncrono)
+O `IdentidadeClient` usa `RestClient` com `IDENTIDADE_BASE_URL=http://servico-identidade:8080` e repassa o header `Authorization` recebido para validar tutor/animal.
+
+### 4. Clínico → RabbitMQ (assíncrono)
+O serviço clínico publica no exchange `vet.events` (topic) as routing keys:
+- `atendimento.iniciado`
+- `atendimento.realizado`
+- `atendimento.cancelado`
+
+O serviço de faturamento (quando pronto) deverá declarar uma fila e fazer o binding, por exemplo `atendimento.realizado`.
+
+> **JWT compartilhado:** identidade assina os tokens, clínico e agendamento validam com o **mesmo** `JWT_SECRET`. Alterar o segredo em apenas um serviço quebra a autenticação entre eles.
+
+## 📂 Estrutura de diretórios
 
 ```text
 workspace-vet/
-├── vet-infrastructure/        # Repositório atual (orquestração Docker)
-├── vet-frontend-web/           # Interface gráfica (HTML/CSS/JS)
-├── vet-api-gateway/            # Arquivos do Nginx
-├── vet-identidade-service/     # Microsserviço Spring Boot
-├── vet-clinico-service/        # Microsserviço Spring Boot
-├── vet-agendamento-service/    # Microsserviço Spring Boot
-└── vet-faturamento-service/    # Microsserviço Spring Boot
+├── vet-infrastructure/              # Este repositório (orquestração Docker)
+├── vet-frontend-web/                # Interface React/Vite
+├── vet-api-gateway/                 # Nginx (proxy reverso)
+├── vet-identidade-service/          # Spring Boot
+├── vet-clinico-service/             # Spring Boot
+├── vet-agendamento-service/         # Spring Boot
+└── vet-faturamento-service/         # Spring Boot (esqueleto, não integrado)
 ```
 
 ## 🛠️ Pré-requisitos
 
-Certifique-se de ter instalado em sua máquina:
-
-- Docker Desktop (v20.10+)
-- Docker Compose (v2.0+)
+- Docker Desktop 20.10+
+- Docker Compose v2+
 - Git
-- Beekeeper Studio (opcional, para gestão gráfica dos bancos SQL)
 
-## 🚀 Como executar o ambiente
-
-### 1. Configurar as variáveis de ambiente
-
-Copie o arquivo de exemplo `.env.example` para criar seu `.env` local:
+## 🚀 Como executar
 
 ```bash
 cd vet-infrastructure
-cp .env.example .env
-```
-
-Opcionalmente, edite o arquivo `.env` para alterar senhas ou portas padrão.
-
-### 2. Subir todos os containers
-
-Execute o comando do Docker Compose para construir as imagens dos repositórios e iniciar os serviços em segundo plano:
-
-```bash
+cp .env.example .env   # ajuste se necessário
 docker compose up -d --build
 ```
 
-### 3. Verificar o status dos containers
-
-Acompanhe a inicialização e o estado dos *healthchecks*:
+Acompanhe a inicialização:
 
 ```bash
 docker compose ps
-```
-
-Para visualizar os logs unificados de todos os serviços:
-
-```bash
 docker compose logs -f
 ```
 
-## 🌐 Mapeamento de endereços e portas
+A primeira execução baixa dependências Maven/npm e pode levar alguns minutos. O `docker-compose.override.yml` já publica as portas de acesso local.
 
-### Serviços principais
+## 🌐 Endereços e portas
 
-| Serviço | URL de acesso local | Descrição |
+### Aplicação
+
+| Serviço | URL local | Descrição |
 |---|---|---|
-| Aplicação Web (Frontend) | `http://localhost` | Interface de usuário para recepção, veterinários e administradores |
-| API Gateway | `http://localhost/api` | Ponto único de roteamento HTTP |
-| RabbitMQ Management | `http://localhost:15672` | Interface web para monitoramento de filas e exchanges |
+| Frontend | http://localhost:8000 | Interface web (via gateway) |
+| API Gateway | http://localhost:8000/api/v1 | Ponto único da API |
+| RabbitMQ Management | http://localhost:15672 | Filas/exchanges (usuário/senha do `.env`) |
+| Mailpit (e-mails) | http://localhost:8025 | Caixa de e-mail local (recuperação de senha) |
 
-### Conexões de banco de dados
+### Bancos (acesso com cliente SQL)
 
-Os bancos utilizam portas mapeadas pelo `docker-compose.override.yml`. Para conectar seu cliente SQL (Beekeeper Studio ou DBeaver), use `localhost` como host:
+| Banco | Database | Porta no host |
+|---|---|---:|
+| Identidade | `db_identidade` | `5431` |
+| Clínico | `db_clinico` | `5435` |
+| Agendamento | `db_agendamento` | `5433` |
+| Faturamento | `db_faturamento` | `5434` (quando integrado) |
 
-| Banco de dados | Database | Porta no host | Usuário padrão |
-|---|---|---:|---|
-| BD Identidade | `db_identidade` | `5431` | `vet_user` |
-| BD Clínico | `db_clinico` | `5432` | `vet_user` |
-| BD Agendamento | `db_agendamento` | `5433` | `vet_user` |
-| BD Faturamento | `db_faturamento` | `5434` | `vet_user` |
+### Acesso direto aos microsserviços (debug)
 
-## 🛠️ Comandos úteis de manutenção
+| Serviço | URL local |
+|---|---|
+| Identidade | http://localhost:8081 |
+| Clínico | http://localhost:8082 |
+| Agendamento | http://localhost:8084 |
 
-**Parar a execução mantendo os dados intactos:**
+> Em uso normal, acesse sempre pelo gateway (`http://localhost:8000/api/v1/...`).
+
+## 🧪 Verificando a integração
 
 ```bash
+# Gateway + serviço de agendamento respondendo
+curl http://localhost:8000/api/actuator/health
+
+# Rota protegida do identidade: deve retornar 401 (prova que o gateway roteou)
+curl -i http://localhost:8000/api/v1/tutores/me
+
+# Rota protegida do clínico: deve retornar 401
+curl -i http://localhost:8000/api/v1/atendimentos
+
+# Rota protegida do agendamento: deve retornar 401
+curl -i http://localhost:8000/api/v1/agendamentos
+
+# Rota inexistente: 404 explícito do gateway
+curl -i http://localhost:8000/api/v1/rota-inexistente
+```
+
+No RabbitMQ Management (`http://localhost:15672`), após iniciar/finalizar um atendimento, confira o exchange `vet.events`.
+
+## 🛠️ Comandos úteis
+
+```bash
+# Parar mantendo dados
 docker compose stop
-```
 
-**Derrubar containers e liberar redes:**
-
-```bash
+# Derrubar containers e rede
 docker compose down
-```
 
-**Derrubar tudo e limpar todos os volumes/bancos de dados (reset total):**
-
-> ⚠️ Este comando remove os volumes associados e apaga os dados persistidos dos bancos.
-
-```bash
+# Reset total (apaga volumes/bancos)
 docker compose down -v
-```
 
-**Reconstruir apenas um microsserviço específico após alteração no código:**
-
-```bash
+# Rebuild de um serviço específico
 docker compose up -d --build servico-clinico
+
+# Logs de um serviço
+docker compose logs -f servico-agendamento
 ```
+
+## 🩺 Problemas comuns
+
+| Sintoma | Causa provável | Solução |
+|---|---|---|
+| `401` em todos os serviços | `JWT_SECRET` diferente entre containers | Use o mesmo valor no `.env` e recrie os serviços. |
+| Gateway retorna `502` | Microsserviço ainda subindo ou com erro | `docker compose logs -f servico-X`; aguarde o healthcheck. |
+| Frontend chama `localhost:8080` | Build antigo com `.env` desatualizado | `docker compose build --no-cache interface-web` e suba de novo. |
+| `404` em rota existente | Prefixo não mapeado no `nginx.conf` | Adicione o `location` correspondente e recrie o gateway. |
+| Agendamento não acha tutor | `IDENTIDADE_BASE_URL` incorreto | Deve ser `http://servico-identidade:8080` dentro do Docker. |
 
 ## 🛡️ Segurança
 
-- O arquivo `.env` contém senhas de acesso local e **nunca deve ser commitado** no controle de versão.
-- O arquivo `.env.example` serve apenas como referência das chaves necessárias e deve ser mantido atualizado com dados genéricos.
+- O arquivo `.env` contém credenciais locais e **não deve ser commitado**.
+- `.env.example` deve conter apenas valores genéricos.
+- Em produção, remova o `docker-compose.override.yml` (ou não publique bancos/serviços internos) e troque todos os segredos.

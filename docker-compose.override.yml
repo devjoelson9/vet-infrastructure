@@ -1,10 +1,15 @@
-version: '3.8'
-
+# Portas publicadas no host para acesso local.
+# Em produção, remova este arquivo ou não publique os bancos/serviços internos.
 services:
   rabbitmq:
     ports:
       - "${RABBITMQ_AMQP_PORT:-5672}:5672"
       - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+
+  mailpit:
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "${MAILPIT_UI_PORT:-8025}:8025"
 
   bd-identidade:
     ports:
@@ -12,12 +17,21 @@ services:
 
   bd-clinico:
     ports:
-      - "${POSTGRES_PORT_CLINICO:-5432}:5432"
+      - "${POSTGRES_PORT_CLINICO:-5435}:5432"
 
   bd-agendamento:
     ports:
       - "${POSTGRES_PORT_AGENDAMENTO:-5433}:5432"
 
-  bd-faturamento:
+  # Acesso direto aos microsserviços (útil para depurar sem passar pelo gateway).
+  servico-identidade:
     ports:
-      - "${POSTGRES_PORT_FATURAMENTO:-5434}:5432"
+      - "${IDENTIDADE_PORT:-8081}:8080"
+
+  servico-clinico:
+    ports:
+      - "${CLINICO_PORT:-8082}:8080"
+
+  servico-agendamento:
+    ports:
+      - "${AGENDAMENTO_PORT:-8084}:8080"
