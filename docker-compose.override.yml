@@ -23,6 +23,10 @@ services:
     ports:
       - "${POSTGRES_PORT_AGENDAMENTO:-5433}:5432"
 
+  bd-faturamento:
+    ports:
+      - "${POSTGRES_PORT_FATURAMENTO:-5434}:5432"
+
   # Acesso direto aos microsserviços (útil para depurar sem passar pelo gateway).
   servico-identidade:
     ports:
@@ -35,3 +39,7 @@ services:
   servico-agendamento:
     ports:
       - "${AGENDAMENTO_PORT:-8084}:8080"
+
+  servico-faturamento:
+    ports:
+      - "${FATURAMENTO_PORT:-8085}:8080"

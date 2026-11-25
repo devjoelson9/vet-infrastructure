@@ -13,7 +13,7 @@ A arquitetura usa microsserviços desacoplados com **Database-per-Service** (Pos
 | `vet-agendamento-service` | ✅ Integrado | Agendamentos/disponibilidades e chamadas HTTP ao serviço de identidade. |
 | `vet-frontend-web` | ✅ Integrado | Build Vite servido pelo Nginx e consumindo o gateway em `/api`. |
 | `vet-api-gateway` | ✅ Integrado | Roteia `/` (frontend) e `/api/v1/**` (microsserviços). |
-| `vet-faturamento-service` | ⏳ Pendente | Ainda é um esqueleto (sem Dockerfile, controllers ou domínio). Bloco comentado no compose. |
+| `vet-faturamento-service` | ✅ Integrado | Container, banco próprio e rota de pagamentos no gateway. Consulta o atendimento/valor no clínico e conclui o agendamento via HTTP. |
 
 ## 🔗 Como os serviços conversam
 
@@ -28,13 +28,12 @@ Navegador
        │ /api/v1/** (HTTP, JWT no header Authorization)
        ├──────────────────────────────► servico-identidade :8080 ──► bd-identidade
        ├──────────────────────────────► servico-clinico    :8080 ──► bd-clinico ──┐
-       └──────────────────────────────► servico-agendamento:8080 ──► bd-agendamento
-                                                │                                │
-                                                │ HTTP (RestClient)              │ AMQP (publish)
-                                                ▼                                ▼
-                                       servico-identidade                     rabbitmq
-                                                                            exchange vet.events
-                                                                            (atendimento.*)
+       ├──────────────────────────────► servico-agendamento:8080 ──► bd-agendamento
+       └──────────────────────────────► servico-faturamento:8080 ──► bd-faturamento
+                                                │
+                                                │ HTTP (RestClient, JWT repassado)
+                                                ├──────────────► servico-clinico
+                                                └──────────────► servico-agendamento
 ```
 
 ### 1. Frontend → Gateway
@@ -48,6 +47,7 @@ O Nginx roteia pelo prefixo do recurso, preservando o path original:
 | `/` | `interface-web:80` |
 | `/api/v1/auth`, `/api/v1/tutores`, `/api/v1/admin`, `/api/v1/recepcionista`, `/api/v1/veterinario` | `servico-identidade:8080` |
 | `/api/v1/atendimentos`, `/api/v1/medicamentos`, `/api/v1/catalogo-itens` | `servico-clinico:8080` |
+| `/api/v1/atendimentos/{id}/pagamentos` | `servico-faturamento:8080` (regra de maior prioridade no Nginx) |
 | `/api/v1/agendamentos`, `/api/v1/disponibilidades` | `servico-agendamento:8080` |
 | `/api/actuator/health` | `servico-agendamento:8080/actuator/health` |
 
@@ -60,9 +60,17 @@ O serviço clínico publica no exchange `vet.events` (topic) as routing keys:
 - `atendimento.realizado`
 - `atendimento.cancelado`
 
-O serviço de faturamento (quando pronto) deverá declarar uma fila e fazer o binding, por exemplo `atendimento.realizado`.
+O serviço de agendamento consome esses eventos para atualizar o status do agendamento.
 
-> **JWT compartilhado:** identidade assina os tokens, clínico e agendamento validam com o **mesmo** `JWT_SECRET`. Alterar o segredo em apenas um serviço quebra a autenticação entre eles.
+### 5. Faturamento → Clínico e Agendamento (síncrono)
+O faturamento não mantém cópia dos atendimentos. Ao registrar um pagamento ele:
+1. consulta `GET /api/v1/atendimentos/{id}` no clínico (`CLINICO_SERVICE_URL`) para validar o status `FINALIZADO` e obter o valor total calculado;
+2. grava o pagamento no `db_faturamento`;
+3. chama `PATCH /api/v1/agendamentos/{id}/status` (`AGENDAMENTO_SERVICE_URL`) para levar o agendamento a `CONCLUIDO`.
+
+O header `Authorization` recebido do gateway é repassado nas duas chamadas.
+
+> **JWT compartilhado:** identidade assina os tokens; clínico, agendamento e faturamento validam com o **mesmo** `JWT_SECRET`. Alterar o segredo em apenas um serviço quebra a autenticação entre eles.
 
 ## 📂 Estrutura de diretórios
 
@@ -74,7 +82,7 @@ workspace-vet/
 ├── vet-identidade-service/          # Spring Boot
 ├── vet-clinico-service/             # Spring Boot
 ├── vet-agendamento-service/         # Spring Boot
-└── vet-faturamento-service/         # Spring Boot (esqueleto, não integrado)
+└── vet-faturamento-service/         # Spring Boot (faturamento e pagamentos)
 ```
 
 ## 🛠️ Pré-requisitos
@@ -118,7 +126,7 @@ A primeira execução baixa dependências Maven/npm e pode levar alguns minutos.
 | Identidade | `db_identidade` | `5431` |
 | Clínico | `db_clinico` | `5435` |
 | Agendamento | `db_agendamento` | `5433` |
-| Faturamento | `db_faturamento` | `5434` (quando integrado) |
+| Faturamento | `db_faturamento` | `5434` |
 
 ### Acesso direto aos microsserviços (debug)
 
@@ -127,6 +135,7 @@ A primeira execução baixa dependências Maven/npm e pode levar alguns minutos.
 | Identidade | http://localhost:8081 |
 | Clínico | http://localhost:8082 |
 | Agendamento | http://localhost:8084 |
+| Faturamento | http://localhost:8085 |
 
 > Em uso normal, acesse sempre pelo gateway (`http://localhost:8000/api/v1/...`).
 
@@ -144,6 +153,9 @@ curl -i http://localhost:8000/api/v1/atendimentos
 
 # Rota protegida do agendamento: deve retornar 401
 curl -i http://localhost:8000/api/v1/agendamentos
+
+# Rota protegida do faturamento: deve retornar 401 (pagamento de um atendimento)
+curl -i http://localhost:8000/api/v1/atendimentos/1/pagamentos
 
 # Rota inexistente: 404 explícito do gateway
 curl -i http://localhost:8000/api/v1/rota-inexistente
@@ -166,6 +178,9 @@ docker compose down -v
 # Rebuild de um serviço específico
 docker compose up -d --build servico-clinico
 
+# Rebuild do faturamento (inclui o banco na primeira subida)
+docker compose up -d --build servico-faturamento
+
 # Logs de um serviço
 docker compose logs -f servico-agendamento
 ```
@@ -174,11 +189,14 @@ docker compose logs -f servico-agendamento
 
 | Sintoma | Causa provável | Solução |
 |---|---|---|
-| `401` em todos os serviços | `JWT_SECRET` diferente entre containers | Use o mesmo valor no `.env` e recrie os serviços. |
+| `401` em todos os serviços | `JWT_SECRET` diferente entre containers | Use o mesmo valor no `.env` e recrie identidade, clínico, agendamento e faturamento. |
 | Gateway retorna `502` | Microsserviço ainda subindo ou com erro | `docker compose logs -f servico-X`; aguarde o healthcheck. |
 | Frontend chama `localhost:8080` | Build antigo com `.env` desatualizado | `docker compose build --no-cache interface-web` e suba de novo. |
 | `404` em rota existente | Prefixo não mapeado no `nginx.conf` | Adicione o `location` correspondente e recrie o gateway. |
 | Agendamento não acha tutor | `IDENTIDADE_BASE_URL` incorreto | Deve ser `http://servico-identidade:8080` dentro do Docker. |
+| Faturamento retorna `404` ao registrar pagamento | Atendimento inexistente no serviço clínico | Confira o `id` do atendimento e o `CLINICO_SERVICE_URL`. |
+| Faturamento recusa o pagamento | Atendimento ainda não está `FINALIZADO` | Finalize o atendimento no serviço clínico antes de faturar (RN14). |
+| Faturamento não consegue concluir o agendamento | `AGENDAMENTO_SERVICE_URL` vazio/incorreto | Deve ser `http://servico-agendamento:8080` dentro do Docker. |
 
 ## 🛡️ Segurança
 
