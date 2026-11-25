@@ -255,6 +255,8 @@ services:
         condition: service_healthy
       servico-agendamento:
         condition: service_healthy
+      servico-faturamento:
+        condition: service_healthy
     networks:
       - vet-network
     healthcheck:
@@ -265,51 +267,57 @@ services:
       start_period: 10s
 
   # ==================================================
-  # FATURAMENTO (ainda NÃO integrado)
+  # FATURAMENTO
   # ==================================================
-  # O vet-faturamento-service está apenas como esqueleto (sem Dockerfile,
-  # sem domínio/controllers e com application.properties incompleto).
-  # Quando estiver pronto, descomente o bloco abaixo e crie o Dockerfile.
-  #
-  # bd-faturamento:
-  #   image: postgres:16-alpine
-  #   container_name: bd-faturamento
-  #   restart: unless-stopped
-  #   environment:
-  #     POSTGRES_DB: ${POSTGRES_DB_FATURAMENTO:-db_faturamento}
-  #     POSTGRES_USER: ${POSTGRES_USER:-vet_user}
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vet_password}
-  #   volumes:
-  #     - postgres_faturamento_data:/var/lib/postgresql/data
-  #   networks:
-  #     - vet-network
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vet_user} -d ${POSTGRES_DB_FATURAMENTO:-db_faturamento}"]
-  #     interval: 5s
-  #     timeout: 5s
-  #     retries: 10
-  #
-  # servico-faturamento:
-  #   build:
-  #     context: ../vet-faturamento-service/vet-faturamento-service
-  #     dockerfile: Dockerfile
-  #   container_name: servico-faturamento
-  #   restart: unless-stopped
-  #   environment:
-  #     DB_HOST: bd-faturamento
-  #     DB_PORT: "5432"
-  #     DB_NAME: ${POSTGRES_DB_FATURAMENTO:-db_faturamento}
-  #     DB_USER: ${POSTGRES_USER:-vet_user}
-  #     DB_PASS: ${POSTGRES_PASSWORD:-vet_password}
-  #     JWT_SECRET: ${JWT_SECRET:-uma-chave-secreta-muito-longa-e-segura-para-hmac-sha256-com-pelo-menos-256-bits}
-  #     SPRING_RABBITMQ_HOST: rabbitmq
-  #     SPRING_RABBITMQ_PORT: "5672"
-  #     SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-guest}
-  #     SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
-  #   depends_on:
-  #     bd-faturamento:
-  #       condition: service_healthy
-  #     rabbitmq:
-  #       condition: service_healthy
-  #   networks:
-  #     - vet-network
+  bd-faturamento:
+    image: postgres:16-alpine
+    container_name: bd-faturamento
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB_FATURAMENTO:-db_faturamento}
+      POSTGRES_USER: ${POSTGRES_USER:-vet_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vet_password}
+    volumes:
+      - postgres_faturamento_data:/var/lib/postgresql/data
+    networks:
+      - vet-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vet_user} -d ${POSTGRES_DB_FATURAMENTO:-db_faturamento}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  servico-faturamento:
+    build:
+      context: ../vet-faturamento-service/vet-faturamento-service
+      dockerfile: Dockerfile
+    container_name: servico-faturamento
+    restart: unless-stopped
+    environment:
+      DB_HOST: bd-faturamento
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB_FATURAMENTO:-db_faturamento}
+      DB_USER: ${POSTGRES_USER:-vet_user}
+      DB_PASS: ${POSTGRES_PASSWORD:-vet_password}
+      JWT_SECRET: ${JWT_SECRET:-uma-chave-secreta-muito-longa-e-segura-para-hmac-sha256-com-pelo-menos-256-bits}
+      # Fonte da verdade dos atendimentos e do valor calculado (RN13)
+      CLINICO_SERVICE_URL: http://servico-clinico:8080
+      # Chamada HTTP ao serviço de agendamento para concluir o agendamento
+      # após o registro do pagamento (RF20).
+      AGENDAMENTO_SERVICE_URL: http://servico-agendamento:8080
+    depends_on:
+      bd-faturamento:
+        condition: service_healthy
+      servico-clinico:
+        condition: service_healthy
+      servico-agendamento:
+        condition: service_healthy
+    networks:
+      - vet-network
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
